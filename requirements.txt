@@ -1,0 +1,7 @@
+openai
+python-dotenv
+pyvis
+networkx
+requests
+beautifulsoup4
+arxiv

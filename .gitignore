@@ -1,0 +1,14 @@
+.env
+data/
+__pycache__/
+*.pyc
+.venv/
+knowledge_graph.html
+.idea/
+lib/
+
+# 根目录旧文件（已迁移到 src/）
+/extractor.py
+/graph.py
+/improve.py
+/test_tool.py
