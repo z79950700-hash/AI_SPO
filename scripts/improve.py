@@ -13,7 +13,10 @@ from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
-load_dotenv()
+# 始终从项目根目录运行，无论从哪里启动脚本
+PROJECT_ROOT = Path(__file__).parent.parent
+os.chdir(PROJECT_ROOT)
+load_dotenv(PROJECT_ROOT / ".env")
 
 REPO = "z79950700-hash/AI_SPO"
 BRANCH = "main"
