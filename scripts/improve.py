@@ -63,8 +63,26 @@ def index_repo():
         json={"remote": "github", "repository": REPO, "branch": BRANCH},
     )
     resp.raise_for_status()
-    print("Greptile 索引已触发，等待 60 秒...")
-    time.sleep(60)
+    print("Greptile 索引已触发，轮询状态...")
+
+    # 轮询直到索引完成，repositoryId 格式：github:main:owner%2Frepo
+    repo_id = f"github:{BRANCH}:{REPO.replace('/', '%2F')}"
+    for i in range(20):  # 最多等 5 分钟
+        time.sleep(15)
+        status_resp = requests.get(
+            f"https://api.greptile.com/v2/repositories/{repo_id}",
+            headers=_greptile_headers(),
+        )
+        if status_resp.status_code == 200:
+            status = status_resp.json().get("status", "")
+            print(f"  [{i+1}] 索引状态：{status}")
+            if status == "completed":
+                print("索引完成！")
+                return
+        else:
+            print(f"  [{i+1}] 等待中...")
+
+    print("索引超时，尝试继续...")
 
 
 def get_review() -> tuple[float, list[str]]:
