@@ -68,8 +68,7 @@ def get_client() -> OpenAI:
 
 
 def extract_triples(text: str, client: OpenAI) -> list[tuple[str, str, str]]:
-    """
-    从一段文本中抽取 (S, P, O) 三元组列表。
+    """从一段文本中抽取 (S, P, O) 三元组列表。
 
     对标 CMeKG 的 extract_spoes(text, model4s, model4po)。
 
@@ -81,7 +80,7 @@ def extract_triples(text: str, client: OpenAI) -> list[tuple[str, str, str]]:
         list[tuple[str, str, str]]: 三元组列表，每个元素为 (主语, 关系, 宾语)。
 
     Raises:
-        ValueError: 如果 API 响应中缺少 tool_calls 或解析失败。
+        ValueError: 如果 API 响应中缺少 choices 或 tool_calls。
         json.JSONDecodeError: 如果返回的 JSON 格式错误。
     """
     response = client.chat.completions.create(
@@ -103,12 +102,14 @@ def extract_triples(text: str, client: OpenAI) -> list[tuple[str, str, str]]:
         result = json.loads(tool_call.function.arguments)
     except json.JSONDecodeError as e:
         raise json.JSONDecodeError(f"解析函数参数 JSON 失败: {e}", e.doc, e.pos) from e
-    return [(t["s"], t["p"], t["o"]) for t in result.get("triples", [])]
+    triples = result.get("triples", [])
+    if not triples:
+        return []
+    return [(t["s"], t["p"], t["o"]) for t in triples]
 
 
 def extract_from_texts(texts: list[str], client: OpenAI) -> list[tuple[str, str, str]]:
-    """
-    批量处理多段文本，去重后返回所有三元组。
+    """批量处理多段文本，去重后返回所有三元组。
 
     对标 CMeKG 的 get_triples(content, model4s, model4po)。
 
@@ -165,6 +166,11 @@ def load_triples(path: str = "data/triples.json") -> list[tuple[str, str, str]]:
         FileNotFoundError: 如果文件不存在。
         json.JSONDecodeError: 如果文件内容不是有效的 JSON。
     """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"文件不存在: {path}")
     with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(f"JSON 解析失败: {e}", e.doc, e.pos) from e
     return [(d["s"], d["p"], d["o"]) for d in data]
