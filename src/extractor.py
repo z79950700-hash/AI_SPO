@@ -61,7 +61,7 @@ def get_client() -> OpenAI:
     Returns:
         OpenAI: 配置好的 OpenAI 客户端实例。
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_key: str | None = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise ValueError("请设置环境变量 DEEPSEEK_API_KEY，或在项目根目录创建 .env 文件")
     return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
@@ -99,10 +99,10 @@ def extract_triples(text: str, client: OpenAI) -> list[tuple[str, str, str]]:
         raise ValueError("模型没有返回 tool_calls，可能是输出格式错误")
     tool_call = message.tool_calls[0]
     try:
-        result = json.loads(tool_call.function.arguments)
+        result: dict = json.loads(tool_call.function.arguments)
     except json.JSONDecodeError as e:
         raise json.JSONDecodeError(f"解析函数参数 JSON 失败: {e}", e.doc, e.pos) from e
-    triples = result.get("triples", [])
+    triples: list = result.get("triples", [])
     if not triples:
         return []
     return [(t["s"], t["p"], t["o"]) for t in triples]
@@ -127,7 +127,7 @@ def extract_from_texts(texts: list[str], client: OpenAI) -> list[tuple[str, str,
             continue
         print(f"[{i+1}/{len(texts)}] 抽取中：{text[:40].strip()}...")
         try:
-            triples = extract_triples(text, client)
+            triples: list[tuple[str, str, str]] = extract_triples(text, client)
         except (ValueError, json.JSONDecodeError) as e:
             print(f"  \u2717 抽取失败: {e}")
             continue
@@ -147,7 +147,7 @@ def save_triples(triples: list[tuple[str, str, str]], path: str = "data/triples.
         path: 输出文件路径，默认为 "data/triples.json"。
     """
     Path(path).parent.mkdir(exist_ok=True)
-    data = [{"s": s, "p": p, "o": o} for s, p, o in triples]
+    data: list[dict[str, str]] = [{"s": s, "p": p, "o": o} for s, p, o in triples]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print(f"已保存 {len(triples)} 条三元组 \u2192 {path}")
@@ -170,7 +170,9 @@ def load_triples(path: str = "data/triples.json") -> list[tuple[str, str, str]]:
         raise FileNotFoundError(f"文件不存在: {path}")
     with open(path, "r", encoding="utf-8") as f:
         try:
-            data = json.load(f)
+            data: list[dict[str, str]] = json.load(f)
         except json.JSONDecodeError as e:
             raise json.JSONDecodeError(f"JSON 解析失败: {e}", e.doc, e.pos) from e
+    if not data:
+        return []
     return [(d["s"], d["p"], d["o"]) for d in data]
