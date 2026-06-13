@@ -100,6 +100,18 @@ def ensure_pr() -> int:
 
 # ─── 读取 Greptile 评审 ───────────────────────────────────────────────────────
 
+def get_greptile_comment_ts(pr_number: int) -> str:
+    """读取当前最新 Greptile comment 的 updated_at，作为下轮等待的基准。
+    Greptile 通常需要 1-3 分钟才会评审，所以 push 后立即调用拿到的是旧时间戳。"""
+    resp = requests.get(
+        f"https://api.github.com/repos/{REPO}/issues/{pr_number}/comments",
+        headers=_gh_headers(),
+    )
+    for comment in (resp.json() or []):
+        if "greptile" in comment.get("user", {}).get("login", "").lower():
+            return comment.get("updated_at", "")
+    return ""
+
 def _parse_score(body: str) -> float | None:
     """从 Greptile 评审正文提取数字评分（1-5）"""
     patterns = [
@@ -116,14 +128,14 @@ def _parse_score(body: str) -> float | None:
 
 
 def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, str, str]:
-    """轮询 PR，等待 Greptile 评审。
-    since_time 为空字符串时接受任何现有评论（第 1 轮）。
+    """轮询 PR，等待 Greptile 发布比 since_time 更新的评审。
+    since_time 为空时接受任意评论（首次运行、仓库无历史评审）。
     返回 (score, raw_body, comment_updated_at)。
     """
-    print(f"等待 Greptile 评审（since_time={since_time!r}，最多 10 分钟）...")
+    print(f"等待 Greptile 评审（since_time={since_time!r}，最多 20 分钟）...")
     last_greptile_body = None
 
-    for i in range(40):
+    for i in range(80):  # 最多等 20 分钟（80 × 15s）
         time.sleep(15)
 
         # 查 PR reviews
@@ -243,23 +255,22 @@ def run_loop(max_iter: int = 5):
     client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
 
     setup_review_branch()
-
-    # 首次推送，触发第一次 Greptile 评审（force=True 确保远端分支存在）
-    since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     git_push("improve: start greptile review loop", force=True)
     pr_number = ensure_pr()
 
-    last_review_updated_at = ""  # 第 1 轮：接受任何现有 Greptile 评论
+    # 读取「当前」Greptile 评论的 updated_at 作为基准。
+    # Greptile 评审耗时 1-3 分钟，此时读到的一定是上一轮留下的旧时间戳。
+    # wait_for_greptile_review 只接受 updated_at > last_ts 的新评论，
+    # 彻底避免把旧评分当成本轮结果。
+    last_ts = get_greptile_comment_ts(pr_number)
+    print(f"Greptile 基准时间戳：{last_ts or '（无历史评审，接受第一个评论）'}")
 
     for i in range(max_iter):
         print(f"\n{'='*50}")
         print(f"第 {i+1} 轮评审")
         print('='*50)
 
-        score, raw_body, last_review_updated_at = wait_for_greptile_review(
-            pr_number,
-            last_review_updated_at if i == 0 else since_time,
-        )
+        score, raw_body, last_ts = wait_for_greptile_review(pr_number, last_ts)
 
         print(f"当前评分：{score:.1f} / 5.0")
 
@@ -270,7 +281,6 @@ def run_loop(max_iter: int = 5):
         print(f"\n评分 {score} < 4，开始修改...")
         fix_code(raw_body, client)
 
-        since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         pushed = git_push(f"improve: round {i+1}, prev score={score:.1f}")
         if not pushed:
             print("代码无实质变化，DeepSeek 未能从评审中提取改进点，退出")
