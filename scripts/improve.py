@@ -172,6 +172,25 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, st
 
 # ─── 代码修复 ────────────────────────────────────────────────────────────────
 
+def _extract_json(text: str) -> dict | None:
+    """按花括号深度找第一个完整的 JSON 对象，避免贪婪正则截断嵌套结构。"""
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if start is None:
+                start = i
+            depth += 1
+        elif ch == '}' and start is not None:
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    start = None  # 这段不合法，继续往后找
+    return None
+
+
 def fix_code(raw_review: str, client: OpenAI):
     files_content = {
         f: Path(f).read_text(encoding="utf-8")
@@ -204,12 +223,10 @@ def fix_code(raw_review: str, client: OpenAI):
     )
 
     raw = response.choices[0].message.content
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if not match:
-        print("DeepSeek 返回格式异常，跳过本轮修改")
+    result = _extract_json(raw)
+    if result is None:
+        print(f"DeepSeek 返回格式异常，跳过本轮修改\n原文：{raw[:300]}")
         return
-
-    result = json.loads(match.group())
     for fname, new_content in result.items():
         if fname in SOURCE_FILES:
             Path(fname).write_text(new_content, encoding="utf-8")
