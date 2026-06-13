@@ -1,5 +1,8 @@
 """
-自动优化循环：push 代码 → Greptile 评审 → DeepSeek 修复 → 循环直到评分 > 4
+自动优化循环：push PR → Greptile GitHub App 自动评审 → 读 PR 评论拿评分
+          → DeepSeek 修复 → 推更新 → 循环直到评分 ≥ 4
+
+前提：Greptile GitHub App 已安装在仓库上
 从项目根目录运行：python scripts/improve.py
 """
 
@@ -13,142 +16,157 @@ from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# 始终从项目根目录运行，无论从哪里启动脚本
 PROJECT_ROOT = Path(__file__).parent.parent
 os.chdir(PROJECT_ROOT)
 load_dotenv(PROJECT_ROOT / ".env")
 
 REPO = "z79950700-hash/AI_SPO"
-BRANCH = "main"
+BASE_BRANCH = "main"
+REVIEW_BRANCH = "greptile-review"
 SOURCE_FILES = ["src/extractor.py", "src/graph.py"]
+
+
+# ─── GitHub API ─────────────────────────────────────────────────────────────
+
+def _gh_headers() -> dict:
+    return {
+        "Authorization": f"token {os.environ['GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
 
 # ─── Git ────────────────────────────────────────────────────────────────────
 
-def git_init_and_push_first():
-    if not Path(".git").exists():
-        subprocess.run(["git", "init"], check=True)
-        subprocess.run(["git", "branch", "-M", BRANCH], check=True)
-        token = os.environ["GITHUB_TOKEN"]
-        remote = f"https://{token}@github.com/{REPO}.git"
-        subprocess.run(["git", "remote", "add", "origin", remote], check=True)
-        print("Git 仓库已初始化")
-    git_push("feat: initial commit")
+def setup_review_branch():
+    """切换到 greptile-review 分支（本地不存在则创建）"""
+    local = subprocess.run(
+        ["git", "branch", "--list", REVIEW_BRANCH],
+        capture_output=True, text=True,
+    )
+    if local.stdout.strip():
+        subprocess.run(["git", "checkout", REVIEW_BRANCH], check=True)
+    else:
+        subprocess.run(["git", "checkout", "-b", REVIEW_BRANCH], check=True)
+    print(f"当前分支：{REVIEW_BRANCH}")
 
 
-def git_push(commit_msg: str):
-    subprocess.run(["git", "add", "."], check=True)
+def git_push(commit_msg: str) -> bool:
+    subprocess.run(["git", "add"] + SOURCE_FILES + ["scripts/improve.py"], check=True)
     result = subprocess.run(["git", "commit", "-m", commit_msg])
     if result.returncode != 0:
-        print("没有新变更，跳过 commit")
-        return
-    subprocess.run(["git", "push", "-u", "origin", BRANCH], check=True)
+        print("没有新变更，仅同步分支到远端")
+    # 不管有没有新 commit，都 push，确保远端分支存在
+    subprocess.run(["git", "push", "-u", "origin", REVIEW_BRANCH], check=True)
     print(f"已推送：{commit_msg}")
+    return True
 
 
-# ─── Greptile ───────────────────────────────────────────────────────────────
+# ─── PR 管理 ─────────────────────────────────────────────────────────────────
 
-def _greptile_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {os.environ['GREPTILE_API_KEY']}",
-        "X-Github-Token": os.environ["GITHUB_TOKEN"],
-        "Content-Type": "application/json",
-    }
-
-
-def _greptile_mcp_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {os.environ['GREPTILE_API_KEY']}",
-        "Content-Type": "application/json",
-    }
-
-
-def index_repo():
-    resp = requests.post(
-        "https://api.greptile.com/v2/repositories",
-        headers=_greptile_headers(),
-        json={"remote": "github", "repository": REPO, "branch": BRANCH},
+def ensure_pr() -> int:
+    """确保存在 greptile-review → main 的 PR，返回 PR 号"""
+    owner = REPO.split("/")[0]
+    resp = requests.get(
+        f"https://api.github.com/repos/{REPO}/pulls",
+        headers=_gh_headers(),
+        params={"head": f"{owner}:{REVIEW_BRANCH}", "base": BASE_BRANCH, "state": "open"},
     )
     resp.raise_for_status()
-    print("Greptile 索引已触发，轮询状态...")
+    pulls = resp.json()
+    if pulls:
+        pr_number = pulls[0]["number"]
+        print(f"复用已有 PR #{pr_number}")
+        return pr_number
 
-    # 轮询直到索引完成，repositoryId 格式：github:main:owner%2Frepo
-    repo_id = f"github:{BRANCH}:{REPO.replace('/', '%2F')}"
-    for i in range(20):  # 最多等 5 分钟
-        time.sleep(15)
-        status_resp = requests.get(
-            f"https://api.greptile.com/v2/repositories/{repo_id}",
-            headers=_greptile_headers(),
-        )
-        if status_resp.status_code == 200:
-            status = status_resp.json().get("status", "")
-            print(f"  [{i+1}] 索引状态：{status}")
-            if status.upper() == "COMPLETED":
-                print("索引完成！")
-                return
-        else:
-            print(f"  [{i+1}] 等待中...")
-
-    print("索引超时，尝试继续...")
-
-
-def get_review() -> tuple[float, list[str]]:
-    prompt = (
-        "请对这个仓库的代码质量打分（1-5分），"
-        "从代码规范、错误处理、可维护性、文档注释四个维度综合评估。"
-        '严格返回 JSON，不要包含其他文字：{"score": 数字, "suggestions": ["建议1", "建议2"]}'
-    )
-
-    # 第一步：获取完整工具列表
-    list_resp = requests.post(
-        "https://api.greptile.com/mcp",
-        headers=_greptile_mcp_headers(),
-        json={"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}},
-    )
-    list_result = list_resp.json() if list_resp.ok else {}
-    tools = list_result.get("result", {}).get("tools", [])
-    tool_names = [t["name"] for t in tools]
-    print(f"  可用工具：{tool_names}")
-
-    # 第二步：直接用工具名作为 method 调用（Greptile 不支持标准 tools/call）
-    # 优先找 query 相关工具，否则用第一个
-    query_tool = next((n for n in tool_names if "query" in n.lower()), None)
-    tool_to_call = query_tool or (tool_names[0] if tool_names else None)
-    if not tool_to_call:
-        raise RuntimeError(f"Greptile MCP 未返回任何工具，tools/list 响应：{list_resp.text[:200]}")
-
-    print(f"  调用工具：{tool_to_call}")
     resp = requests.post(
-        "https://api.greptile.com/mcp",
-        headers=_greptile_mcp_headers(),
+        f"https://api.github.com/repos/{REPO}/pulls",
+        headers=_gh_headers(),
         json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": tool_to_call,
-            "params": {
-                "query": prompt,
-                "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
-            },
+            "title": "AI_SPO: Greptile + DeepSeek 自动优化",
+            "body": "由 improve.py 自动创建，循环优化直到 Greptile 评分 ≥ 4/5",
+            "head": REVIEW_BRANCH,
+            "base": BASE_BRANCH,
         },
     )
-    print(f"  响应 {resp.status_code}：{resp.text[:400]}")
+    resp.raise_for_status()
+    pr_number = resp.json()["number"]
+    print(f"已创建 PR #{pr_number}")
+    return pr_number
 
-    mcp_result = resp.json() if resp.ok else {}
-    if resp.ok and "error" not in mcp_result:
-        content = mcp_result.get("result", {}).get("content", [])
-        raw = content[0].get("text", "") if content else str(mcp_result.get("result", ""))
-    else:
-        raise RuntimeError(
-            f"Greptile MCP 调用失败。\n"
-            f"可用工具：{tool_names}\n"
-            f"调用 '{tool_to_call}' 响应：{resp.text[:400]}"
+
+# ─── 读取 Greptile 评审 ───────────────────────────────────────────────────────
+
+def _parse_greptile_body(body: str) -> tuple[float | None, list[str]]:
+    """从 Greptile 评审正文提取评分和建议，返回 (score, suggestions)"""
+    patterns = [
+        r'(?:confidence|score)[:\s]+(\d+(?:\.\d+)?)\s*/\s*5',
+        r'(\d+(?:\.\d+)?)\s*/\s*5\s+confidence',
+        r'\*\*(\d+(?:\.\d+)?)/5\*\*',
+        r'(\d+(?:\.\d+)?)\s*/\s*5',
+    ]
+    for pat in patterns:
+        m = re.search(pat, body, re.IGNORECASE)
+        if m:
+            score = float(m.group(1))
+            suggestions = re.findall(r'[-*]\s+(.+)', body)
+            return score, suggestions[:10]
+    return None, []
+
+
+def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, list[str]]:
+    """
+    轮询 PR 的 reviews 和 comments，等待 Greptile 在 since_time 之后发布评审
+    """
+    print("等待 Greptile 评审（最多 10 分钟）...")
+    last_greptile_body = None
+
+    for i in range(40):
+        time.sleep(15)
+
+        # 查 PR reviews（Greptile 通常通过 review 发布）
+        rev_resp = requests.get(
+            f"https://api.github.com/repos/{REPO}/pulls/{pr_number}/reviews",
+            headers=_gh_headers(),
         )
+        for review in reversed(rev_resp.json() or []):
+            login = review.get("user", {}).get("login", "")
+            submitted_at = review.get("submitted_at", "")
+            body = review.get("body", "")
+            if "greptile" in login.lower() and submitted_at > since_time and body:
+                last_greptile_body = body
+                score, suggestions = _parse_greptile_body(body)
+                if score is not None:
+                    print(f"  找到评分（来自 PR review）")
+                    return score, suggestions
 
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if not match:
-        raise ValueError(f"Greptile 返回格式异常：{raw}")
-    data = json.loads(match.group())
-    return float(data["score"]), data["suggestions"]
+        # 也查 issue comments（Greptile 有时用 comment）
+        cmt_resp = requests.get(
+            f"https://api.github.com/repos/{REPO}/issues/{pr_number}/comments",
+            headers=_gh_headers(),
+        )
+        for comment in reversed(cmt_resp.json() or []):
+            login = comment.get("user", {}).get("login", "")
+            created_at = comment.get("created_at", "")
+            body = comment.get("body", "")
+            if "greptile" in login.lower() and created_at > since_time and body:
+                last_greptile_body = body
+                score, suggestions = _parse_greptile_body(body)
+                if score is not None:
+                    print(f"  找到评分（来自 PR comment）")
+                    return score, suggestions
+
+        if last_greptile_body:
+            print(f"  [{i+1}] Greptile 已评论但未解析到评分，原文：{last_greptile_body[:200]}")
+        else:
+            print(f"  [{i+1}] 等待 Greptile 评审...")
+
+    msg = "等待超时（10 分钟）"
+    if last_greptile_body:
+        msg += f"\n\n【Greptile 原文，请告诉我如何提取评分】\n{last_greptile_body[:800]}"
+    else:
+        msg += f"\n请检查：\n1. Greptile GitHub App 是否正确安装\n2. PR #{pr_number} 是否存在"
+    raise TimeoutError(msg)
 
 
 # ─── 代码修复 ────────────────────────────────────────────────────────────────
@@ -183,7 +201,7 @@ def fix_code(suggestions: list[str], client: OpenAI):
     raw = response.choices[0].message.content
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:
-        print(f"DeepSeek 返回格式异常，跳过本轮修改")
+        print("DeepSeek 返回格式异常，跳过本轮修改")
         return
 
     result = json.loads(match.group())
@@ -195,18 +213,23 @@ def fix_code(suggestions: list[str], client: OpenAI):
 
 # ─── 主循环 ──────────────────────────────────────────────────────────────────
 
-def run_loop(max_iter: int = 10):
+def run_loop(max_iter: int = 5):
     client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
 
-    git_init_and_push_first()
-    index_repo()
+    setup_review_branch()
+
+    # 首次推送，触发第一次 Greptile 评审
+    since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    git_push("improve: start greptile review loop")
+    pr_number = ensure_pr()
 
     for i in range(max_iter):
         print(f"\n{'='*50}")
         print(f"第 {i+1} 轮评审")
         print('='*50)
 
-        score, suggestions = get_review()
+        score, suggestions = wait_for_greptile_review(pr_number, since_time)
+
         print(f"当前评分：{score:.1f} / 5.0")
         print("Greptile 建议：")
         for s in suggestions:
@@ -218,11 +241,12 @@ def run_loop(max_iter: int = 10):
 
         print(f"\n评分 {score} < 4，开始修改...")
         fix_code(suggestions, client)
-        git_push(f"improve: round {i+1}, prev score={score:.1f}")
 
-        if i < max_iter - 1:
-            print("等待 Greptile 重新索引（60秒）...")
-            time.sleep(60)
+        since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        pushed = git_push(f"improve: round {i+1}, prev score={score:.1f}")
+        if not pushed:
+            print("代码无变化，提前退出")
+            break
     else:
         print(f"\n⚠️ 已达最大循环次数（{max_iter}轮），停止")
 
