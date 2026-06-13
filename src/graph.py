@@ -9,12 +9,11 @@ from pathlib import Path
 from pyvis.network import Network
 import networkx as nx
 
-# 尝试以模块方式导入，否则直接运行则通过 sys.path 修复导入
-if __name__ == "__main__":
-    # 将项目根目录加入 sys.path，使 from extractor import load_triples 可用
-    project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+# 添加 src 目录到 sys.path，确保可以导入 extractor 模块
+if __name__ == "__main__" or __package__ is None:
+    src_root = Path(__file__).resolve().parent
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
     from extractor import load_triples
 else:
     from .extractor import load_triples
