@@ -100,7 +100,8 @@ def get_review() -> tuple[float, list[str]]:
             "stream": False,
         },
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Greptile query 失败 {resp.status_code}：{resp.text}")
     raw = resp.json().get("message", "")
 
     match = re.search(r'\{.*\}', raw, re.DOTALL)
