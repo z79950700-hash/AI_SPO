@@ -99,11 +99,26 @@ def get_review() -> tuple[float, list[str]]:
         '严格返回 JSON，不要包含其他文字：{"score": 数字, "suggestions": ["建议1", "建议2"]}'
     )
 
-    # 先尝试 MCP endpoint（Greptile v2 主接口）
+    # 第一步：探测 MCP 支持的方法列表
+    list_resp = requests.post(
+        "https://api.greptile.com/mcp",
+        headers=_greptile_mcp_headers(),
+        json={"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}},
+    )
+    print(f"  tools/list 响应 {list_resp.status_code}：{list_resp.text[:400]}")
+
+    # 第二步：根据探测结果决定用哪个方法名
+    tool_method = "tools/call"  # 默认 MCP 标准方法
+    if list_resp.ok:
+        list_result = list_resp.json()
+        if "error" in list_result:
+            # MCP 不支持 tools/list，尝试直接用 query
+            tool_method = "query"
+
     mcp_payload = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "tools/call",
+        "method": tool_method,
         "params": {
             "name": "query",
             "arguments": {
@@ -117,16 +132,15 @@ def get_review() -> tuple[float, list[str]]:
         headers=_greptile_mcp_headers(),
         json=mcp_payload,
     )
-    print(f"  MCP 响应 {resp.status_code}：{resp.text[:200]}")
+    print(f"  MCP {tool_method} 响应 {resp.status_code}：{resp.text[:400]}")
 
-    if resp.ok:
-        result = resp.json()
-        # MCP tools/call 结果在 result.result.content[0].text
-        content = result.get("result", {}).get("content", [])
-        raw = content[0].get("text", "") if content else str(result)
+    mcp_result = resp.json() if resp.ok else {}
+    if resp.ok and "error" not in mcp_result:
+        content = mcp_result.get("result", {}).get("content", [])
+        raw = content[0].get("text", "") if content else str(mcp_result.get("result", ""))
     else:
         # 降级：旧 REST API
-        print(f"  MCP 失败，尝试 REST /v2/query ...")
+        print("  MCP 不可用，降级到 REST /v2/query ...")
         rest_payload = {
             "messages": [{"id": "1", "role": "user", "content": prompt}],
             "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
@@ -140,8 +154,8 @@ def get_review() -> tuple[float, list[str]]:
         )
         if not resp2.ok:
             raise RuntimeError(
-                f"MCP 失败 {resp.status_code}：{resp.text}\n"
-                f"REST 失败 {resp2.status_code}：{resp2.text}"
+                f"MCP 失败：{resp.text[:200]}\n"
+                f"REST 失败 {resp2.status_code}：{resp2.text[:200]}"
             )
         raw = resp2.json().get("message", "") or str(resp2.json())
 
