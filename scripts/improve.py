@@ -115,10 +115,12 @@ def _parse_score(body: str) -> float | None:
     return None
 
 
-def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, str]:
-    """轮询 PR，等待 Greptile 在 since_time 之后发布评审。
-    返回 (score, raw_body)，raw_body 是评审原文供 DeepSeek 参考。"""
-    print("等待 Greptile 评审（最多 10 分钟）...")
+def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, str, str]:
+    """轮询 PR，等待 Greptile 评审。
+    since_time 为空字符串时接受任何现有评论（第 1 轮）。
+    返回 (score, raw_body, comment_updated_at)。
+    """
+    print(f"等待 Greptile 评审（since_time={since_time!r}，最多 10 分钟）...")
     last_greptile_body = None
 
     for i in range(40):
@@ -129,38 +131,41 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, st
             f"https://api.github.com/repos/{REPO}/pulls/{pr_number}/reviews",
             headers=_gh_headers(),
         )
-        for review in reversed(rev_resp.json() or []):
+        for review in (rev_resp.json() or []):
             login = review.get("user", {}).get("login", "")
             submitted_at = review.get("submitted_at", "")
             body = review.get("body", "")
-            if "greptile" in login.lower() and submitted_at > since_time and body:
-                last_greptile_body = body
-                score = _parse_score(body)
-                if score is not None:
-                    print("  找到评分（来自 PR review）")
-                    return score, body
+            if "greptile" in login.lower():
+                time_ok = (not since_time) or submitted_at > since_time
+                print(f"  [review] login={login} submitted_at={submitted_at} time_ok={time_ok}")
+                if time_ok and body:
+                    last_greptile_body = body
+                    score = _parse_score(body)
+                    if score is not None:
+                        print("  找到评分（来自 PR review）")
+                        return score, body, submitted_at
 
         # 查 issue comments
         cmt_resp = requests.get(
             f"https://api.github.com/repos/{REPO}/issues/{pr_number}/comments",
             headers=_gh_headers(),
         )
-        for comment in reversed(cmt_resp.json() or []):
+        for comment in (cmt_resp.json() or []):
             login = comment.get("user", {}).get("login", "")
-            # Greptile 编辑同一条评论而非新建，用 updated_at 而非 created_at
             updated_at = comment.get("updated_at", "")
             body = comment.get("body", "")
-            if "greptile" in login.lower() and updated_at > since_time and body:
-                last_greptile_body = body
-                score = _parse_score(body)
-                if score is not None:
-                    print("  找到评分（来自 PR comment）")
-                    return score, body
+            if "greptile" in login.lower():
+                time_ok = (not since_time) or updated_at > since_time
+                print(f"  [comment] login={login} updated_at={updated_at} time_ok={time_ok} score={_parse_score(body)}")
+                if time_ok and body:
+                    last_greptile_body = body
+                    score = _parse_score(body)
+                    if score is not None:
+                        print("  找到评分（来自 PR comment）")
+                        return score, body, updated_at
 
-        if last_greptile_body:
-            print(f"  [{i+1}] Greptile 已评论但未解析到评分，原文：{last_greptile_body[:200]}")
-        else:
-            print(f"  [{i+1}] 等待 Greptile 评审...")
+        if not last_greptile_body:
+            print(f"  [{i+1}] 暂无 Greptile 评论...")
 
     msg = "等待超时（10 分钟）"
     if last_greptile_body:
@@ -244,12 +249,17 @@ def run_loop(max_iter: int = 5):
     git_push("improve: start greptile review loop", force=True)
     pr_number = ensure_pr()
 
+    last_review_updated_at = ""  # 第 1 轮：接受任何现有 Greptile 评论
+
     for i in range(max_iter):
         print(f"\n{'='*50}")
         print(f"第 {i+1} 轮评审")
         print('='*50)
 
-        score, raw_body = wait_for_greptile_review(pr_number, since_time)
+        score, raw_body, last_review_updated_at = wait_for_greptile_review(
+            pr_number,
+            last_review_updated_at if i == 0 else since_time,
+        )
 
         print(f"当前评分：{score:.1f} / 5.0")
 
