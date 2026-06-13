@@ -4,11 +4,19 @@
 输出：knowledge_graph.html（可在浏览器直接打开）
 """
 
+import sys
 from pathlib import Path
 from pyvis.network import Network
 import networkx as nx
 
-from .extractor import load_triples
+# 添加 src 目录到 sys.path，确保可以导入 extractor 模块
+if __name__ == "__main__" or __package__ is None:
+    src_root = Path(__file__).resolve().parent
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+    from extractor import load_triples
+else:
+    from .extractor import load_triples
 
 RELATION_COLORS = {
     "is_a":        "#E74C3C",
@@ -23,6 +31,14 @@ RELATION_COLORS = {
 
 
 def build_graph(triples: list[tuple[str, str, str]]) -> nx.DiGraph:
+    """从三元组列表构建有向图。
+
+    Args:
+        triples: 三元组列表，每个元素为 (主语, 关系, 宾语)。
+
+    Returns:
+        nx.DiGraph: 构建好的有向图对象。
+    """
     G = nx.DiGraph()
     for s, p, o in triples:
         G.add_node(s)
@@ -31,7 +47,13 @@ def build_graph(triples: list[tuple[str, str, str]]) -> nx.DiGraph:
     return G
 
 
-def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html"):
+def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html") -> None:
+    """将图可视化为交互式 HTML 文件。
+
+    Args:
+        G: 要可视化的有向图。
+        output: 输出 HTML 文件路径。
+    """
     net = Network(
         height="800px",
         width="100%",
@@ -87,7 +109,12 @@ def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html"):
     print(f"图谱已生成：{output}，用浏览器打开即可查看")
 
 
-def print_stats(G: nx.DiGraph):
+def print_stats(G: nx.DiGraph) -> None:
+    """打印图谱统计信息。
+
+    Args:
+        G: 要统计的有向图。
+    """
     print(f"\n图谱统计：")
     print(f"  节点数（概念）：{G.number_of_nodes()}")
     print(f"  边数（关系）：  {G.number_of_edges()}")
@@ -104,3 +131,19 @@ def print_stats(G: nx.DiGraph):
     print("  最核心概念 Top10：")
     for node, deg in top_nodes:
         print(f"    {node}: {deg} 条关系")
+
+
+if __name__ == "__main__":
+    # 简单测试：从默认路径加载并生成图谱
+    try:
+        triples = load_triples()
+        if triples:
+            G = build_graph(triples)
+            print_stats(G)
+            visualize(G)
+        else:
+            print("没有加载到三元组。")
+    except FileNotFoundError as e:
+        print(f"{e}\n请先运行 extractor 模块生成三元组数据。")
+    except Exception as e:
+        print(f"发生错误: {e}")
