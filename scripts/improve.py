@@ -173,21 +173,20 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, st
 # ─── 代码修复 ────────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict | None:
-    """按花括号深度找第一个完整的 JSON 对象，避免贪婪正则截断嵌套结构。"""
-    depth = 0
-    start = None
-    for i, ch in enumerate(text):
-        if ch == '{':
-            if start is None:
-                start = i
-            depth += 1
-        elif ch == '}' and start is not None:
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    start = None  # 这段不合法，继续往后找
+    """用标准库解析器找第一个完整 JSON 对象，正确跳过字符串内的花括号。"""
+    decoder = json.JSONDecoder()
+    i = 0
+    while i < len(text):
+        start = text.find('{', i)
+        if start == -1:
+            break
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        i = start + 1
     return None
 
 
