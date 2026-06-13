@@ -147,9 +147,10 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, st
         )
         for comment in reversed(cmt_resp.json() or []):
             login = comment.get("user", {}).get("login", "")
-            created_at = comment.get("created_at", "")
+            # Greptile 编辑同一条评论而非新建，用 updated_at 而非 created_at
+            updated_at = comment.get("updated_at", "")
             body = comment.get("body", "")
-            if "greptile" in login.lower() and created_at > since_time and body:
+            if "greptile" in login.lower() and updated_at > since_time and body:
                 last_greptile_body = body
                 score = _parse_score(body)
                 if score is not None:
