@@ -56,6 +56,13 @@ def _greptile_headers() -> dict:
     }
 
 
+def _greptile_mcp_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {os.environ['GREPTILE_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+
+
 def index_repo():
     resp = requests.post(
         "https://api.greptile.com/v2/repositories",
@@ -91,18 +98,52 @@ def get_review() -> tuple[float, list[str]]:
         "从代码规范、错误处理、可维护性、文档注释四个维度综合评估。"
         '严格返回 JSON，不要包含其他文字：{"score": 数字, "suggestions": ["建议1", "建议2"]}'
     )
+
+    # 先尝试 MCP endpoint（Greptile v2 主接口）
+    mcp_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "query",
+            "arguments": {
+                "query": prompt,
+                "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
+            },
+        },
+    }
     resp = requests.post(
-        "https://api.greptile.com/v2/query",
-        headers=_greptile_headers(),
-        json={
-            "messages": [{"role": "user", "content": prompt}],
+        "https://api.greptile.com/mcp",
+        headers=_greptile_mcp_headers(),
+        json=mcp_payload,
+    )
+    print(f"  MCP 响应 {resp.status_code}：{resp.text[:200]}")
+
+    if resp.ok:
+        result = resp.json()
+        # MCP tools/call 结果在 result.result.content[0].text
+        content = result.get("result", {}).get("content", [])
+        raw = content[0].get("text", "") if content else str(result)
+    else:
+        # 降级：旧 REST API
+        print(f"  MCP 失败，尝试 REST /v2/query ...")
+        rest_payload = {
+            "messages": [{"id": "1", "role": "user", "content": prompt}],
             "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
             "stream": False,
-        },
-    )
-    if not resp.ok:
-        raise RuntimeError(f"Greptile query 失败 {resp.status_code}：{resp.text}")
-    raw = resp.json().get("message", "")
+            "genius": True,
+        }
+        resp2 = requests.post(
+            "https://api.greptile.com/v2/query",
+            headers=_greptile_headers(),
+            json=rest_payload,
+        )
+        if not resp2.ok:
+            raise RuntimeError(
+                f"MCP 失败 {resp.status_code}：{resp.text}\n"
+                f"REST 失败 {resp2.status_code}：{resp2.text}"
+            )
+        raw = resp2.json().get("message", "") or str(resp2.json())
 
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:
