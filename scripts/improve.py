@@ -76,7 +76,7 @@ def index_repo():
         if status_resp.status_code == 200:
             status = status_resp.json().get("status", "")
             print(f"  [{i+1}] 索引状态：{status}")
-            if status == "completed":
+            if status.upper() == "COMPLETED":
                 print("索引完成！")
                 return
         else:
