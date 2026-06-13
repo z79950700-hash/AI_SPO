@@ -51,15 +51,18 @@ def setup_review_branch():
     print(f"当前分支：{REVIEW_BRANCH}")
 
 
-def git_push(commit_msg: str) -> bool:
+def git_push(commit_msg: str, force: bool = False) -> bool:
+    """提交并推送。force=True 时即使无新 commit 也 push（用于首次建立远端分支）。
+    返回是否产生了新 commit（只有新 commit 才会触发 Greptile 评审）。"""
     subprocess.run(["git", "add"] + SOURCE_FILES + ["scripts/improve.py"], check=True)
     result = subprocess.run(["git", "commit", "-m", commit_msg])
-    if result.returncode != 0:
-        print("没有新变更，仅同步分支到远端")
-    # 不管有没有新 commit，都 push，确保远端分支存在
+    committed = result.returncode == 0
+    if not committed and not force:
+        print("没有新变更，跳过 push")
+        return False
     subprocess.run(["git", "push", "-u", "origin", REVIEW_BRANCH], check=True)
     print(f"已推送：{commit_msg}")
-    return True
+    return committed
 
 
 # ─── PR 管理 ─────────────────────────────────────────────────────────────────
@@ -97,8 +100,8 @@ def ensure_pr() -> int:
 
 # ─── 读取 Greptile 评审 ───────────────────────────────────────────────────────
 
-def _parse_greptile_body(body: str) -> tuple[float | None, list[str]]:
-    """从 Greptile 评审正文提取评分和建议，返回 (score, suggestions)"""
+def _parse_score(body: str) -> float | None:
+    """从 Greptile 评审正文提取数字评分（1-5）"""
     patterns = [
         r'(?:confidence|score)[:\s]+(\d+(?:\.\d+)?)\s*/\s*5',
         r'(\d+(?:\.\d+)?)\s*/\s*5\s+confidence',
@@ -108,23 +111,20 @@ def _parse_greptile_body(body: str) -> tuple[float | None, list[str]]:
     for pat in patterns:
         m = re.search(pat, body, re.IGNORECASE)
         if m:
-            score = float(m.group(1))
-            suggestions = re.findall(r'[-*]\s+(.+)', body)
-            return score, suggestions[:10]
-    return None, []
+            return float(m.group(1))
+    return None
 
 
-def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, list[str]]:
-    """
-    轮询 PR 的 reviews 和 comments，等待 Greptile 在 since_time 之后发布评审
-    """
+def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, str]:
+    """轮询 PR，等待 Greptile 在 since_time 之后发布评审。
+    返回 (score, raw_body)，raw_body 是评审原文供 DeepSeek 参考。"""
     print("等待 Greptile 评审（最多 10 分钟）...")
     last_greptile_body = None
 
     for i in range(40):
         time.sleep(15)
 
-        # 查 PR reviews（Greptile 通常通过 review 发布）
+        # 查 PR reviews
         rev_resp = requests.get(
             f"https://api.github.com/repos/{REPO}/pulls/{pr_number}/reviews",
             headers=_gh_headers(),
@@ -135,12 +135,12 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, li
             body = review.get("body", "")
             if "greptile" in login.lower() and submitted_at > since_time and body:
                 last_greptile_body = body
-                score, suggestions = _parse_greptile_body(body)
+                score = _parse_score(body)
                 if score is not None:
-                    print(f"  找到评分（来自 PR review）")
-                    return score, suggestions
+                    print("  找到评分（来自 PR review）")
+                    return score, body
 
-        # 也查 issue comments（Greptile 有时用 comment）
+        # 查 issue comments
         cmt_resp = requests.get(
             f"https://api.github.com/repos/{REPO}/issues/{pr_number}/comments",
             headers=_gh_headers(),
@@ -151,10 +151,10 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, li
             body = comment.get("body", "")
             if "greptile" in login.lower() and created_at > since_time and body:
                 last_greptile_body = body
-                score, suggestions = _parse_greptile_body(body)
+                score = _parse_score(body)
                 if score is not None:
-                    print(f"  找到评分（来自 PR comment）")
-                    return score, suggestions
+                    print("  找到评分（来自 PR comment）")
+                    return score, body
 
         if last_greptile_body:
             print(f"  [{i+1}] Greptile 已评论但未解析到评分，原文：{last_greptile_body[:200]}")
@@ -171,14 +171,13 @@ def wait_for_greptile_review(pr_number: int, since_time: str) -> tuple[float, li
 
 # ─── 代码修复 ────────────────────────────────────────────────────────────────
 
-def fix_code(suggestions: list[str], client: OpenAI):
+def fix_code(raw_review: str, client: OpenAI):
     files_content = {
         f: Path(f).read_text(encoding="utf-8")
         for f in SOURCE_FILES
         if Path(f).exists()
     }
     files_text = "\n\n".join(f"=== {name} ===\n{code}" for name, code in files_content.items())
-    suggestions_text = "\n".join(f"- {s}" for s in suggestions)
 
     response = client.chat.completions.create(
         model="deepseek-chat",
@@ -187,13 +186,18 @@ def fix_code(suggestions: list[str], client: OpenAI):
             {
                 "role": "system",
                 "content": (
-                    "你是Python代码优化专家。根据改进建议修改代码，保持原有功能不变。"
+                    "你是Python代码优化专家。根据代码评审内容改进代码，保持原有功能不变。"
                     '只返回JSON，格式：{"文件名": "完整修改后的代码"}'
                 ),
             },
             {
                 "role": "user",
-                "content": f"改进建议：\n{suggestions_text}\n\n当前代码：\n{files_text}",
+                "content": (
+                    f"以下是 Greptile 对这份 PR 的评审原文：\n{raw_review}\n\n"
+                    f"当前代码：\n{files_text}\n\n"
+                    "请根据评审内容，找出可以实际改进的地方（错误处理、文档、代码规范、类型注解等），"
+                    "修改代码。只返回JSON：{\"文件名\": \"完整修改后的代码\"}"
+                ),
             },
         ],
     )
@@ -218,9 +222,9 @@ def run_loop(max_iter: int = 5):
 
     setup_review_branch()
 
-    # 首次推送，触发第一次 Greptile 评审
+    # 首次推送，触发第一次 Greptile 评审（force=True 确保远端分支存在）
     since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    git_push("improve: start greptile review loop")
+    git_push("improve: start greptile review loop", force=True)
     pr_number = ensure_pr()
 
     for i in range(max_iter):
@@ -228,24 +232,21 @@ def run_loop(max_iter: int = 5):
         print(f"第 {i+1} 轮评审")
         print('='*50)
 
-        score, suggestions = wait_for_greptile_review(pr_number, since_time)
+        score, raw_body = wait_for_greptile_review(pr_number, since_time)
 
         print(f"当前评分：{score:.1f} / 5.0")
-        print("Greptile 建议：")
-        for s in suggestions:
-            print(f"  · {s}")
 
         if score >= 4:
             print(f"\n✅ 评分达标（{score}/5），优化完成！")
             break
 
         print(f"\n评分 {score} < 4，开始修改...")
-        fix_code(suggestions, client)
+        fix_code(raw_body, client)
 
         since_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         pushed = git_push(f"improve: round {i+1}, prev score={score:.1f}")
         if not pushed:
-            print("代码无变化，提前退出")
+            print("代码无实质变化，DeepSeek 未能从评审中提取改进点，退出")
             break
     else:
         print(f"\n⚠️ 已达最大循环次数（{max_iter}轮），停止")
