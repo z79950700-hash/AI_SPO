@@ -279,6 +279,7 @@ def run_loop(max_iter: int = 5):
             break
 
         print(f"\n评分 {score} < 4，开始修改...")
+        print(f"\n--- Greptile 评审原文 ---\n{raw_body}\n--- END ---\n")
         fix_code(raw_body, client)
 
         pushed = git_push(f"improve: round {i+1}, prev score={score:.1f}")
