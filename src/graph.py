@@ -123,3 +123,19 @@ def print_stats(G: nx.DiGraph) -> None:
     print("  最核心概念 Top10：")
     for node, deg in top_nodes:
         print(f"    {node}: {deg} 条关系")
+
+
+if __name__ == "__main__":
+    # 简单测试：从默认路径加载并生成图谱
+    try:
+        triples = load_triples()
+        if triples:
+            G = build_graph(triples)
+            print_stats(G)
+            visualize(G)
+        else:
+            print("没有加载到三元组。")
+    except FileNotFoundError as e:
+        print(f"{e}\n请先运行 extractor 模块生成三元组数据。")
+    except Exception as e:
+        print(f"发生错误: {e}")

@@ -146,7 +146,7 @@ def save_triples(triples: list[tuple[str, str, str]], path: str = "data/triples.
         triples: 三元组列表，每个元素为 (主语, 关系, 宾语)。
         path: 输出文件路径，默认为 "data/triples.json"。
     """
-    Path(path).parent.mkdir(exist_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     data: list[dict[str, str]] = [{"s": s, "p": p, "o": o} for s, p, o in triples]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -176,3 +176,20 @@ def load_triples(path: str = "data/triples.json") -> list[tuple[str, str, str]]:
     if not data:
         return []
     return [(d["s"], d["p"], d["o"]) for d in data]
+
+
+if __name__ == "__main__":
+    # 简单测试：从示例文本抽取并保存
+    client = get_client()
+    sample_texts = [
+        "Transformer模型使用自注意力机制，由Vaswani等人提出。",
+        "BERT是基于Transformer的预训练语言模型，主要用于文本分类。"
+    ]
+    triples = extract_from_texts(sample_texts, client)
+    if triples:
+        print(f"\n共抽取 {len(triples)} 个三元组：")
+        for s, p, o in triples:
+            print(f"  ({s}, {p}, {o})")
+        save_triples(triples)
+    else:
+        print("未抽取到任何三元组。")
