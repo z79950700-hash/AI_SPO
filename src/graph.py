@@ -4,11 +4,20 @@
 输出：knowledge_graph.html（可在浏览器直接打开）
 """
 
+import sys
 from pathlib import Path
 from pyvis.network import Network
 import networkx as nx
 
-from .extractor import load_triples
+# 尝试以模块方式导入，否则直接运行则通过 sys.path 修复导入
+if __name__ == "__main__":
+    # 将项目根目录加入 sys.path，使 from extractor import load_triples 可用
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from extractor import load_triples
+else:
+    from .extractor import load_triples
 
 RELATION_COLORS = {
     "is_a":        "#E74C3C",
