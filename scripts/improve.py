@@ -99,65 +99,50 @@ def get_review() -> tuple[float, list[str]]:
         '严格返回 JSON，不要包含其他文字：{"score": 数字, "suggestions": ["建议1", "建议2"]}'
     )
 
-    # 第一步：探测 MCP 支持的方法列表
+    # 第一步：获取完整工具列表
     list_resp = requests.post(
         "https://api.greptile.com/mcp",
         headers=_greptile_mcp_headers(),
         json={"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}},
     )
-    print(f"  tools/list 响应 {list_resp.status_code}：{list_resp.text[:400]}")
+    list_result = list_resp.json() if list_resp.ok else {}
+    tools = list_result.get("result", {}).get("tools", [])
+    tool_names = [t["name"] for t in tools]
+    print(f"  可用工具：{tool_names}")
 
-    # 第二步：根据探测结果决定用哪个方法名
-    tool_method = "tools/call"  # 默认 MCP 标准方法
-    if list_resp.ok:
-        list_result = list_resp.json()
-        if "error" in list_result:
-            # MCP 不支持 tools/list，尝试直接用 query
-            tool_method = "query"
+    # 第二步：直接用工具名作为 method 调用（Greptile 不支持标准 tools/call）
+    # 优先找 query 相关工具，否则用第一个
+    query_tool = next((n for n in tool_names if "query" in n.lower()), None)
+    tool_to_call = query_tool or (tool_names[0] if tool_names else None)
+    if not tool_to_call:
+        raise RuntimeError(f"Greptile MCP 未返回任何工具，tools/list 响应：{list_resp.text[:200]}")
 
-    mcp_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": tool_method,
-        "params": {
-            "name": "query",
-            "arguments": {
+    print(f"  调用工具：{tool_to_call}")
+    resp = requests.post(
+        "https://api.greptile.com/mcp",
+        headers=_greptile_mcp_headers(),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": tool_to_call,
+            "params": {
                 "query": prompt,
                 "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
             },
         },
-    }
-    resp = requests.post(
-        "https://api.greptile.com/mcp",
-        headers=_greptile_mcp_headers(),
-        json=mcp_payload,
     )
-    print(f"  MCP {tool_method} 响应 {resp.status_code}：{resp.text[:400]}")
+    print(f"  响应 {resp.status_code}：{resp.text[:400]}")
 
     mcp_result = resp.json() if resp.ok else {}
     if resp.ok and "error" not in mcp_result:
         content = mcp_result.get("result", {}).get("content", [])
         raw = content[0].get("text", "") if content else str(mcp_result.get("result", ""))
     else:
-        # 降级：旧 REST API
-        print("  MCP 不可用，降级到 REST /v2/query ...")
-        rest_payload = {
-            "messages": [{"id": "1", "role": "user", "content": prompt}],
-            "repositories": [{"remote": "github", "repository": REPO, "branch": BRANCH}],
-            "stream": False,
-            "genius": True,
-        }
-        resp2 = requests.post(
-            "https://api.greptile.com/v2/query",
-            headers=_greptile_headers(),
-            json=rest_payload,
+        raise RuntimeError(
+            f"Greptile MCP 调用失败。\n"
+            f"可用工具：{tool_names}\n"
+            f"调用 '{tool_to_call}' 响应：{resp.text[:400]}"
         )
-        if not resp2.ok:
-            raise RuntimeError(
-                f"MCP 失败：{resp.text[:200]}\n"
-                f"REST 失败 {resp2.status_code}：{resp2.text[:200]}"
-            )
-        raw = resp2.json().get("message", "") or str(resp2.json())
 
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:
