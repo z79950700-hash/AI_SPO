@@ -23,6 +23,14 @@ RELATION_COLORS = {
 
 
 def build_graph(triples: list[tuple[str, str, str]]) -> nx.DiGraph:
+    """从三元组列表构建有向图。
+
+    Args:
+        triples: 三元组列表，每个元素为 (主语, 关系, 宾语)。
+
+    Returns:
+        nx.DiGraph: 构建好的有向图对象。
+    """
     G = nx.DiGraph()
     for s, p, o in triples:
         G.add_node(s)
@@ -31,7 +39,13 @@ def build_graph(triples: list[tuple[str, str, str]]) -> nx.DiGraph:
     return G
 
 
-def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html"):
+def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html") -> None:
+    """将图可视化为交互式 HTML 文件。
+
+    Args:
+        G: 要可视化的有向图。
+        output: 输出 HTML 文件路径。
+    """
     net = Network(
         height="800px",
         width="100%",
@@ -87,7 +101,12 @@ def visualize(G: nx.DiGraph, output: str = "knowledge_graph.html"):
     print(f"图谱已生成：{output}，用浏览器打开即可查看")
 
 
-def print_stats(G: nx.DiGraph):
+def print_stats(G: nx.DiGraph) -> None:
+    """打印图谱统计信息。
+
+    Args:
+        G: 要统计的有向图。
+    """
     print(f"\n图谱统计：")
     print(f"  节点数（概念）：{G.number_of_nodes()}")
     print(f"  边数（关系）：  {G.number_of_edges()}")
